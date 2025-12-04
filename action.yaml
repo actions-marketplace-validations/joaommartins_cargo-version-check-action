@@ -1,0 +1,94 @@
+name: 'Cargo Version Check'
+description: 'Check if the version in Cargo.toml has changed compared to a base branch or previous commit'
+author: 'joaommartins'
+
+branding:
+  icon: 'package'
+  color: 'orange'
+
+inputs:
+  base-ref:
+    description: 'Base branch reference for comparison (e.g., "main"). If not provided, compares against previous commit.'
+    required: false
+    default: ''
+  cargo-toml-path:
+    description: 'Path to Cargo.toml file relative to repository root'
+    required: false
+    default: 'Cargo.toml'
+
+outputs:
+  version-changed:
+    description: 'Whether the version has changed (true/false)'
+    value: ${{ steps.check.outputs.version_changed }}
+  current-version:
+    description: 'Current version in Cargo.toml'
+    value: ${{ steps.check.outputs.current_version }}
+  previous-version:
+    description: 'Previous version in Cargo.toml'
+    value: ${{ steps.check.outputs.previous_version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check if Cargo.toml version changed
+      id: check
+      shell: bash
+      run: |
+        CARGO_FILE="${{ inputs.cargo-toml-path }}"
+        BASE_REF="${{ inputs.base-ref }}"
+
+        # Verify Cargo.toml exists
+        if [ ! -f "$CARGO_FILE" ]; then
+          echo "::error::Cargo.toml not found at: $CARGO_FILE"
+          exit 1
+        fi
+
+        # Get current version
+        current_version=$(grep '^version =' "$CARGO_FILE" | head -n1 | sed 's/version = "\(.*\)"/\1/')
+
+        if [ -z "$current_version" ]; then
+          echo "::error::Could not extract version from $CARGO_FILE"
+          exit 1
+        fi
+
+        echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
+
+        # Determine comparison strategy
+        if [ -z "$BASE_REF" ]; then
+          # No base ref provided - compare against previous commit
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            previous_version=$(git show HEAD~1:"$CARGO_FILE" | grep '^version =' | head -n1 | sed 's/version = "\(.*\)"/\1/' || echo "")
+          else
+            # First commit - assume version changed
+            echo "::notice::First commit detected, assuming version changed"
+            echo "version_changed=true" >> "$GITHUB_OUTPUT"
+            echo "previous_version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        else
+          # Base ref provided - compare against that branch
+          if git rev-parse --verify "origin/$BASE_REF" >/dev/null 2>&1; then
+            previous_version=$(git show "origin/$BASE_REF:$CARGO_FILE" | grep '^version =' | head -n1 | sed 's/version = "\(.*\)"/\1/' || echo "")
+          else
+            echo "::warning::Base ref origin/$BASE_REF not found, comparing against previous commit"
+            if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+              previous_version=$(git show HEAD~1:"$CARGO_FILE" | grep '^version =' | head -n1 | sed 's/version = "\(.*\)"/\1/' || echo "")
+            else
+              echo "::notice::No previous commit found, assuming version changed"
+              echo "version_changed=true" >> "$GITHUB_OUTPUT"
+              echo "previous_version=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+        fi
+
+        echo "previous_version=$previous_version" >> "$GITHUB_OUTPUT"
+
+        # Compare versions
+        if [ "$current_version" != "$previous_version" ]; then
+          echo "version_changed=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::✓ Version changed: $previous_version → $current_version"
+        else
+          echo "version_changed=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::✗ Version unchanged: $current_version"
+        fi
